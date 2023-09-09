@@ -34,6 +34,16 @@ def key_initizer():
         print("key file created as Credentials.json")
         return keys
 
+def bot_config():
+    if os.path.isfile('config.json'):
+        with open('config.json') as json_file:
+            config = json.load(json_file)
+    else:
+        config = {}
+
+    with open('config.json', 'w') as outfile:
+        json.dump(config, outfile)
+
 def fetch_abi(contract_address, chain_id=1):
     #Get Contract ABI with Etherscan API
     api_key = ETHERSCAN_KEY
@@ -106,11 +116,10 @@ class Token:
         except Exception:
             pass
         return name, symbol, total_supply, owner
-    
     def get_reserves(self):
         reserves = self.pair_contract.functions.getReserves().call()
         return reserves
-    def get_price(self):
+    def get_price_weth(self):
         reserve = self.get_reserves()
         token_decimals = self.contract.functions.decimals().call()
         WETH_decimals = 18
@@ -145,6 +154,31 @@ class Token:
         else:
             print("Token already approved")
             return None
+    def buy(self, amount_in, slippage):
+        amountOutMin = amount_in * (1 - slippage)
+        buy_tx = UNISWAP_V2_ROUTER_CONTRACT.functions.swapExactETHForTokensSupportingFeeOnTransferTokens(
+            w3.to_wei(amountOutMin, 'ether'),       # amountOutMin
+            [WETH, self.address],                   # path (path 0 needs to be WETH)
+            ACCOUNT.address,                        # to
+            int(datetime.now().timestamp()) + 60    # deadline (current + 60s)
+        ).build_transaction({
+            "from": ACCOUNT.address,
+            "nonce": w3.eth.get_transaction_count(ACCOUNT.address),
+            "value": w3.to_wei(amount_in, 'ether'),
+            "gas": 300000,
+            "maxFeePerGas": 2000000000,
+            "maxPriorityFeePerGas": 1500000000,
+        })
+        signed_buy_tx = w3.eth.account.sign_transaction(buy_tx, private_key=ACCOUNT._private_key.hex())
+        tx_hash = w3.eth.send_raw_transaction(signed_buy_tx.rawTransaction)
+        tx = w3.eth.wait_for_transaction_receipt(tx_hash)
+        if tx.status == 1:
+            print("Buy successful")
+            self.approve_to_router()
+            return tx
+        else:
+            print("Buy failed")
+            return tx
 
 def main():
     print("Welcome to Unitrade bot by @edmundtcy, the current version is 0.1.0")
@@ -152,9 +186,9 @@ def main():
     RPC = {
         'mainnet': f'https://mainnet.infura.io/v3/{keys["infura_key"]}',
         'goreli': f'https://goerli.infura.io/v3/{keys["infura_key"]}',
+        'mainnet_mev': f'https://rpc.mevblocker.io',
         'mainnet_ws': f'wss://mainnet.infura.io/ws/v3/{keys["infura_key"]}',
         'goreli_ws': f'wss://goerli.infura.io/ws/v3/{keys["infura_key"]}',
-        'mainnet_mev': f'https://rpc.mevblocker.io'
     }
     
     global w3
@@ -168,7 +202,12 @@ def main():
 
     ETHERSCAN_KEY = keys["etherscan_key"]
     ACCOUNT = Account.from_key(keys["private_key"])
-    w3 = Web3(Web3.HTTPProvider(RPC['goreli'], request_kwargs={'timeout': 60}))
+    network = input("Please enter the network you want to connect to mainnet/goreli (m/g): ")
+    if network == 'm':
+        w3 = Web3(Web3.HTTPProvider(RPC['mainnet_mev'], request_kwargs={'timeout': 60}))
+        infura_w3 = Web3(Web3.HTTPProvider(RPC['mainnet'], request_kwargs={'timeout': 60}))
+    elif network == 'g':
+        w3 = Web3(Web3.HTTPProvider(RPC['goreli'], request_kwargs={'timeout': 60}))
 
     UNISWAP_V2_FACTORY = Web3.to_checksum_address("0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f")
     UNISWAP_V2_ROUTER = Web3.to_checksum_address("0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D")
@@ -179,30 +218,30 @@ def main():
     WETH = UNISWAP_V2_ROUTER_CONTRACT.functions.WETH().call()
 
     print(f'Time: {datetime.now()}')
-    print(f'Ethereum connection Status: {w3.is_connected()}')
     print(f'Chain ID: {w3.eth.chain_id}')
     print(f'Current block number: {w3.eth.block_number}')
+    print(f'Infura block number: {infura_w3.eth.block_number}')
     print(f'Account address: {ACCOUNT.address}')
     print(f'Account balance: {w3.from_wei(w3.eth.get_balance(ACCOUNT.address), "ether")} ETH')
-
     print("Enter the the token address you want to Buy/Sell: ")
+
     while True:
         #Detect token address
+        #0x1f9840a85d5aF5bf1D1762F925BDADdC4201F984
         token_address = input("Token address: ")
         if w3.is_address(token_address):
             token_address = Web3.to_checksum_address(token_address)
             code = w3.eth.get_code(token_address)
             if code == b'':
-                print(f"The address {token_address} is an Ethereum account.")
+                print(f"The address {token_address} is not a contract or does not exit.")
             else:
                 token = Token(token_address, w3.eth.chain_id)
+
                 name, symbol, total_supply, owner = token.get_info()
                 print(f"Token name: {name}")
                 print(f"Token symbol: {symbol}")
                 print(f"Token total supply: {total_supply}")
                 print(f"Token owner: {owner}")
-                print(f'{symbol}/WETH price: {token.get_price()}')
-                token.approve_to_router()
-
+                print(f'{symbol}/WETH price: {token.get_price_weth()}')
 
 main()
